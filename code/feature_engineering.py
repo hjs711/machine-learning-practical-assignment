@@ -1,0 +1,399 @@
+# -*- coding: utf-8 -*-
+"""
+第二部分：特征工程
+==================
+1. 时间序列特征提取
+   (1) 季节编码（四季 one-hot）、月份编码（月份 sin/cos + 年内日序 sin/cos）
+   (2) 滞后特征（lag）：径流与气象因子的 1/2/3/7/14/30 天滞后
+   (3) 窗口特征（rolling）：径流与降水的 3/7/14/30 天滑动均值、标准差、最大值
+2. 特征归一化：实现最小-最大归一化(Min-Max)与 Z-score 标准化，并对比
+3. 特征选择：实现皮尔逊相关系数法与互信息法，并给出特征重要性排序
+
+【防数据泄漏】所有统计量（归一化的均值/方差、特征选择的评分）只在训练集上估计，
+再应用到测试集；滞后与滑动窗口只向过去取数，不使用未来信息。
+"""
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.feature_selection import mutual_info_regression
+
+import config as C
+from utils_plot import save, PALETTE
+
+SEASON_MAP = {12: "冬", 1: "冬", 2: "冬",
+              3: "春", 4: "春", 5: "春",
+              6: "夏", 7: "夏", 8: "夏",
+              9: "秋", 10: "秋", 11: "秋"}
+SEASONS = ["春", "夏", "秋", "冬"]
+
+
+# ===========================================================================
+# 1. 时间序列特征提取
+# ===========================================================================
+def add_time_features(df):
+    """(1) 季节编码 + 月份编码。
+
+    周期性变量用 sin/cos 三角编码，可以避免"12 月与 1 月相距最远"的假象；
+    同时保留四季 one-hot 便于解释。
+    """
+    d = df.copy()
+    doy = d["Date"].dt.dayofyear
+    month = d["Date"].dt.month
+
+    # 周期三角编码：年内日序（周期 365.25）、月份（周期 12）
+    d["doy_sin"] = np.sin(2 * np.pi * doy / 365.25)
+    d["doy_cos"] = np.cos(2 * np.pi * doy / 365.25)
+    d["month_sin"] = np.sin(2 * np.pi * month / 12.0)
+    d["month_cos"] = np.cos(2 * np.pi * month / 12.0)
+
+    # 四季 one-hot
+    season = month.map(SEASON_MAP)
+    for s in SEASONS:
+        d[f"season_{s}"] = (season == s).astype(int)
+    d["season"] = season
+    d["month"] = month
+    return d
+
+
+def add_lag_features(df):
+    """(2) 滞后特征：x(t-1), x(t-2), ... 只使用历史信息。"""
+    d = df.copy()
+    for col in C.LAG_VARS:
+        for k in C.LAG_STEPS:
+            d[f"{col}_lag{k}"] = d[col].shift(k)
+    return d
+
+
+def add_rolling_features(df):
+    """(3) 窗口特征：滑动均值/标准差/最大值。
+
+    closed='both' + min_periods=w 保证窗口仅覆盖 [t-w+1, t]，不含未来。
+    """
+    d = df.copy()
+    for col in C.ROLL_VARS:
+        for w in C.ROLL_WINDOWS:
+            r = d[col].rolling(window=w, min_periods=w)
+            d[f"{col}_roll{w}_mean"] = r.mean()
+            d[f"{col}_roll{w}_std"] = r.std()
+            d[f"{col}_roll{w}_max"] = r.max()
+    return d
+
+
+def add_derived_features(df):
+    """派生气象因子：日均温、日温差（对融雪型流域的径流过程有指示意义）。"""
+    d = df.copy()
+    d["Tmean"] = (d["Tmax"] + d["Tmin"]) / 2.0
+    d["Trange"] = d["Tmax"] - d["Tmin"]
+    # 前期累积降水（反映流域蓄水/土壤含水量，是洪水预报的关键因子）
+    d["Prcp_cum7"] = d["Prcp"].rolling(7, min_periods=7).sum()
+    d["Prcp_cum30"] = d["Prcp"].rolling(30, min_periods=30).sum()
+    d["Tmean_roll7"] = d["Tmean"].rolling(7, min_periods=7).mean()
+    # 融雪指数：日均温高于 0 degC 的积温（近似融雪驱动）
+    d["melt_index"] = d["Tmean"].clip(lower=0).rolling(7, min_periods=7).sum()
+    return d
+
+
+def build_features(df, verbose=True):
+    """构建完整特征表并剔除无效行。"""
+    d = add_time_features(df)
+    d = add_derived_features(d)
+    d = add_lag_features(d)
+    d = add_rolling_features(d)
+
+    # 常量列剔除
+    drop_const = [c for c in C.CONSTANT_FEATURES if c in d.columns]
+    # 基础列（日期/季节标签/目标）不进入特征集合
+    meta_cols = ["Date", "season"]
+
+    feature_cols = [c for c in d.columns
+                    if c not in meta_cols + [C.TARGET] + drop_const]
+
+    before = len(d)
+    d = d.dropna(subset=feature_cols + [C.TARGET]).reset_index(drop=True)
+    if verbose:
+        print(f"  特征构造：原始 {before} 天 -> 有效 {len(d)} 天"
+              f"（前 {before - len(d)} 天因滞后/窗口特征缺测被剔除）")
+        print(f"  自变量个数：{len(feature_cols)}"
+              f"（剔除常量列 {drop_const}）")
+    return d, feature_cols
+
+
+# ===========================================================================
+# 2. 特征归一化
+# ===========================================================================
+class MinMaxScaler:
+    """最小-最大归一化：x' = (x - min) / (max - min)  ->  [0, 1]"""
+
+    def __init__(self):
+        self.min_ = None
+        self.max_ = None
+
+    def fit(self, X):
+        X = np.asarray(X, dtype=float)
+        self.min_ = X.min(axis=0)
+        self.max_ = X.max(axis=0)
+        return self
+
+    def transform(self, X):
+        X = np.asarray(X, dtype=float)
+        rng = self.max_ - self.min_
+        rng[rng == 0] = 1.0          # 防止常量列除零
+        return (X - self.min_) / rng
+
+    def fit_transform(self, X):
+        return self.fit(X).transform(X)
+
+    def inverse_transform(self, X):
+        X = np.asarray(X, dtype=float)
+        return X * (self.max_ - self.min_) + self.min_
+
+
+class ZScoreScaler:
+    """Z-score 标准化：x' = (x - mu) / sigma  ->  均值 0、方差 1"""
+
+    def __init__(self):
+        self.mean_ = None
+        self.std_ = None
+
+    def fit(self, X):
+        X = np.asarray(X, dtype=float)
+        self.mean_ = X.mean(axis=0)
+        self.std_ = X.std(axis=0)
+        self.std_[self.std_ == 0] = 1.0
+        return self
+
+    def transform(self, X):
+        X = np.asarray(X, dtype=float)
+        return (X - self.mean_) / self.std_
+
+    def fit_transform(self, X):
+        return self.fit(X).transform(X)
+
+    def inverse_transform(self, X):
+        X = np.asarray(X, dtype=float)
+        return X * self.std_ + self.mean_
+
+
+SCALERS = {"MinMax": MinMaxScaler, "ZScore": ZScoreScaler}
+
+
+def compare_scalers(df, feature_cols):
+    """对比两种归一化方法：输出各特征归一化前后的统计量。"""
+    X = df[feature_cols].values
+    rows = []
+    for name, cls in SCALERS.items():
+        Xs = cls().fit_transform(X)
+        rows.append({
+            "归一化方法": name,
+            "变换后最小值": round(float(Xs.min()), 4),
+            "变换后最大值": round(float(Xs.max()), 4),
+            "变换后均值": round(float(Xs.mean()), 4),
+            "变换后标准差": round(float(Xs.std()), 4),
+            "是否受量纲影响": "否" if name == "MinMax" else "否",
+            "是否受异常值影响": "是（min/max 由极值决定）" if name == "MinMax"
+                                else "较小（由均值方差决定）",
+        })
+    # 原始
+    rows.insert(0, {
+        "归一化方法": "原始数据",
+        "变换后最小值": round(float(X.min()), 4),
+        "变换后最大值": round(float(X.max()), 4),
+        "变换后均值": round(float(X.mean()), 4),
+        "变换后标准差": round(float(X.std()), 4),
+        "是否受量纲影响": "是", "是否受异常值影响": "是",
+    })
+    tab = pd.DataFrame(rows)
+    tab.to_csv(os.path.join(C.RESULT_DIR, "03_归一化方法对比.csv"),
+               index=False, encoding="utf-8-sig")
+
+    # 可视化
+    show = [c for c in ["Discharge", "Prcp", "Srad", "Vp", "Tmax"] if c in feature_cols][:5]
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    idx = [feature_cols.index(c) for c in show]
+    for ax, (name, data) in zip(axes, [
+            ("(a) 原始数据", X[:, idx]),
+            ("(b) Min-Max 归一化", MinMaxScaler().fit_transform(X)[:, idx]),
+            ("(c) Z-score 标准化", ZScoreScaler().fit_transform(X)[:, idx])]):
+        bp = ax.boxplot([data[:, i] for i in range(len(show))], labels=show,
+                        patch_artist=True,
+                        flierprops=dict(marker=".", markersize=2, alpha=.3))
+        for patch in bp["boxes"]:
+            patch.set_facecolor(PALETTE[0])
+            patch.set_alpha(0.6)
+        ax.set_title(name, fontsize=11)
+        ax.tick_params(axis="x", rotation=30)
+    plt.suptitle("图2-1  归一化前后特征取值分布对比", fontsize=13, y=1.03)
+    plt.tight_layout()
+    save(fig, "fig7_归一化对比.png")
+    return tab
+
+
+# ===========================================================================
+# 3. 特征选择
+# ===========================================================================
+def select_features(df, feature_cols, top_k=None, verbose=True):
+    """在【训练集】上实现皮尔逊相关系数法与互信息法。
+
+    返回
+    ----
+    report : DataFrame，每个特征的 |Pearson|、互信息得分及排序
+    selected : 依据互信息排序取前 top_k 个特征名
+    """
+    top_k = top_k or C.TOP_K_FEATURES
+    tr = df[df["Date"] <= pd.Timestamp(C.TRAIN_END)]
+
+    X = tr[feature_cols].values
+    y = tr[C.TARGET].values
+
+    # --- 皮尔逊相关系数法 ---
+    pear = np.array([abs(np.corrcoef(X[:, i], y)[0, 1])
+                     if X[:, i].std() > 0 else 0.0
+                     for i in range(X.shape[1])])
+
+    # --- 互信息法 ---
+    mi = mutual_info_regression(X, y, random_state=C.RANDOM_STATE)
+    mi = np.nan_to_num(mi)
+
+    rep = pd.DataFrame({
+        "特征": feature_cols,
+        "|皮尔逊相关系数|": pear,
+        "互信息得分": mi,
+    })
+    rep["皮尔逊排名"] = rep["|皮尔逊相关系数|"].rank(ascending=False).astype(int)
+    rep["互信息排名"] = rep["互信息得分"].rank(ascending=False).astype(int)
+    rep = rep.sort_values("互信息得分", ascending=False).reset_index(drop=True)
+    rep.to_csv(os.path.join(C.RESULT_DIR, "04_特征选择得分.csv"),
+               index=False, encoding="utf-8-sig")
+
+    selected = rep["特征"].head(top_k).tolist()
+    if verbose:
+        print(f"  特征选择：共 {len(feature_cols)} 个候选特征，"
+              f"按互信息法保留前 {top_k} 个")
+        print(f"  互信息 Top10：{rep['特征'].head(10).tolist()}")
+
+    _plot_feature_scores(rep, top_k)
+    return rep, selected
+
+
+def _plot_feature_scores(rep, top_k):
+    top = rep.head(min(25, len(rep))).iloc[::-1]
+    fig, axes = plt.subplots(1, 2, figsize=(15, 7))
+    colors = [PALETTE[2] if f in set(rep["特征"].head(top_k)) else "#B0B8C1"
+              for f in top["特征"]]
+
+    axes[0].barh(top["特征"], top["互信息得分"], color=colors, alpha=0.9)
+    axes[0].set_title(f"(a) 互信息法特征重要性 Top{len(top)}（绿色=入选前{top_k}）",
+                      fontsize=11)
+    axes[0].set_xlabel("互信息得分 (nats)")
+    axes[0].tick_params(axis="y", labelsize=8)
+
+    top2 = rep.head(min(25, len(rep))).sort_values("|皮尔逊相关系数|").iloc[-25:]
+    colors2 = [PALETTE[2] if f in set(rep["特征"].head(top_k)) else "#B0B8C1"
+               for f in top2["特征"]]
+    axes[1].barh(top2["特征"], top2["|皮尔逊相关系数|"], color=colors2, alpha=0.9)
+    axes[1].set_title("(b) 皮尔逊相关系数法特征重要性", fontsize=11)
+    axes[1].set_xlabel("|皮尔逊相关系数 r|")
+    axes[1].tick_params(axis="y", labelsize=8)
+
+    plt.suptitle("图2-2  特征选择结果对比", fontsize=13, y=1.0)
+    plt.tight_layout()
+    save(fig, "fig8_特征选择.png")
+
+
+def _plot_feature_groups(rep):
+    """按特征类别汇总互信息贡献。"""
+    def group(name):
+        if name.startswith("season_"):
+            return "季节编码"
+        if name in ("doy_sin", "doy_cos", "month_sin", "month_cos"):
+            return "月份/日序编码"
+        if "_lag" in name:
+            return "滞后特征"
+        if "_roll" in name:
+            return "窗口特征"
+        if name in ("Tmean", "Trange", "Prcp_cum7", "Prcp_cum30",
+                    "Tmean_roll7", "melt_index"):
+            return "派生气象特征"
+        return "原始气象因子"
+
+    rep = rep.copy()
+    rep["类别"] = rep["特征"].map(group)
+    g = rep.groupby("类别")["互信息得分"].agg(["sum", "count", "mean"]).sort_values(
+        "sum", ascending=False).reset_index()
+    g.columns = ["特征类别", "互信息总得分", "特征个数", "平均互信息"]
+    g.to_csv(os.path.join(C.RESULT_DIR, "05_特征类别贡献.csv"),
+             index=False, encoding="utf-8-sig")
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    b = ax.bar(g["特征类别"], g["互信息总得分"],
+               color=PALETTE[:len(g)], alpha=0.85)
+    for rect, (_, row) in zip(b, g.iterrows()):
+        ax.text(rect.get_x() + rect.get_width() / 2, rect.get_height(),
+                f"{row['互信息总得分']:.3f}\n({int(row['特征个数'])}个)",
+                ha="center", va="bottom", fontsize=9)
+    ax.set_ylabel("互信息总得分 (nats)")
+    ax.set_title("图2-3  各类特征对径流的互信息贡献", fontsize=12)
+    ax.tick_params(axis="x", rotation=20)
+    plt.tight_layout()
+    save(fig, "fig9_特征类别贡献.png")
+    return g
+
+
+# ===========================================================================
+# 主流程
+# ===========================================================================
+def run(df):
+    print("\n" + "=" * 70)
+    print("第二部分  特征工程")
+    print("=" * 70)
+
+    d, feature_cols = build_features(df)
+
+    print("\n【1. 时间序列特征提取】")
+    groups = {
+        "季节/月份编码": [c for c in feature_cols if c.startswith("season_")
+                          or c in ("doy_sin", "doy_cos", "month_sin", "month_cos")],
+        "滞后特征": [c for c in feature_cols if "_lag" in c],
+        "窗口特征": [c for c in feature_cols if "_roll" in c],
+        "派生气象特征": [c for c in feature_cols if c in
+                         ("Tmean", "Trange", "Prcp_cum7", "Prcp_cum30",
+                          "Tmean_roll7", "melt_index")],
+        "原始气象因子": [c for c in feature_cols if c in C.USABLE_RAW_FEATURES],
+    }
+    for k, v in groups.items():
+        print(f"    {k:<12}: {len(v):>3} 个")
+
+    print("\n【2. 特征归一化】")
+    tab = compare_scalers(d, feature_cols)
+    print(tab.to_string(index=False))
+
+    print("\n【3. 特征选择】")
+    rep, selected = select_features(d, feature_cols)
+    _plot_feature_groups(rep)
+
+    # 特征与径流的散点（取互信息最高的 6 个特征）
+    top6 = rep["特征"].head(6).tolist()
+    fig, axes = plt.subplots(2, 3, figsize=(14, 7.5))
+    for ax, col in zip(axes.ravel(), top6):
+        ax.scatter(d[col], d[C.TARGET], s=5, alpha=0.35, color=PALETTE[0])
+        ax.set_xlabel(col, fontsize=9)
+        ax.set_ylabel("径流 (ft$^3$/s)", fontsize=9)
+        r = np.corrcoef(d[col], d[C.TARGET])[0, 1]
+        ax.set_title(f"{col}  (r={r:.3f})", fontsize=10)
+    plt.suptitle("图2-4  互信息最高的 6 个特征与径流的散点图", fontsize=13, y=1.0)
+    plt.tight_layout()
+    save(fig, "fig10_特征散点.png")
+
+    # 保存特征表
+    d.to_csv(os.path.join(C.RESULT_DIR, "06_特征工程后数据.csv"),
+             index=False, encoding="utf-8-sig")
+
+    print("\n第二部分完成")
+    return d, feature_cols, selected
+
+
+if __name__ == "__main__":
+    from data_analysis import load_raw
+    run(load_raw())

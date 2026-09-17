@@ -1,0 +1,60 @@
+# 基于机器学习的径流预测
+
+《机器学习课程实践》实验 —— USGS 01047000 流域逐日径流多步预测。
+
+## 目录结构
+
+```
+├── 01047000.csv                  # 数据：2000-2004 逐日，9 字段（Discharge + 7 个 Daymet 气象因子 + 日期）
+├── code/                         # 全部源代码
+│   ├── config.py                 # 全局配置（路径、变量对照、特征与建模参数）
+│   ├── utils_plot.py             # 绘图公共工具（中文字体、配色、保存）
+│   ├── data_analysis.py          # 第一部分：数据分析（统计 + 可视化 + 相关性）
+│   ├── feature_engineering.py    # 第二部分：特征工程（编码/滞后/窗口/归一化/特征选择）
+│   ├── models.py                 # 模型定义（ANN/RF/LSTM）+ GridSearchCV
+│   ├── experiment.py             # 第三部分：多步直接/多输出策略、集成、评价
+│   ├── results_analysis.py       # 第四部分：结果可视化与误差分析
+│   ├── make_report.py            # 报告生成（封面 + 第一~三章）
+│   ├── report_sections.py        # 报告生成（第四~六章 + 附录）
+│   └── run_all.py                # 一键运行全部流程
+├── output/
+│   ├── figures/                  # 全部统计图表（PNG）
+│   ├── results/                  # 全部结果表（CSV）与预测文件（NPZ）
+│   └── run_full.log              # 完整运行日志
+├── 实验报告-机器学习课程实践-径流预测.docx   # 生成的可提交实验报告
+└── README.md
+```
+
+## 运行环境
+
+- Windows 11 / Python 3.13
+- 依赖：`pip install pandas numpy scikit-learn matplotlib tensorflow-cpu python-docx`
+
+## 一键运行
+
+```bash
+cd code
+python run_all.py              # 完整运行（含全部 GridSearchCV，约 1.5~2 小时）
+python run_all.py --fast       # 小规模快速验证（缩小网格与训练轮数，约 10 分钟）
+python run_all.py --skip-model # 跳过建模，仅基于已有结果重绘图表与报告
+```
+
+## 实验设计要点
+
+- **数据划分**：前 4 年（2000-2003）训练，第 5 年（2004）测试，严格按时间顺序，不可打乱。
+- **特征工程**：四季 one-hot、月份/日序三角编码、滞后特征（lag 1/2/3/7/14/30）、
+  滑动窗口统计（mean/std/max）、Min-Max 与 Z-score 归一化、皮尔逊相关系数法与互信息法特征选择。
+- **目标变换**：径流强右偏（偏度 4.96），取对数后建模（预测经 exp 回变换恒为正）。
+- **多步预测**：
+  - 多步直接预测：每个预见期 h=1..7 一个模型，共 7 个；
+  - 多输出预测：一个模型同时输出 7 天。
+- **个体模型**：ANN（MLPRegressor）、随机森林、LSTM；均用 GridSearchCV + TimeSeriesSplit 寻优。
+- **集成学习**：简单平均 + Stacking（Ridge 元学习器，基于折外预测 OOF 训练）。
+- **模型总数**：个体 3×8=24，集成 2×8=16，合计 40。
+- **评价指标**：RMSE、MAE、NSE、R²、PBIAS、MAPE（另附对数尺度 NSE_log）。
+
+## 防数据泄漏的三处关键设计
+
+1. 归一化与特征选择统计量**只在训练集上估计**；
+2. 交叉验证用 **TimeSeriesSplit**（前向链式），不用普通 K 折；
+3. Stacking 元学习器用**折外预测（OOF）**训练，不用训练集拟合值。
