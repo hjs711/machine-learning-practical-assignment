@@ -28,7 +28,10 @@ REPORT_PATH = os.path.join(C.BASE_DIR, "实验报告-机器学习课程实践-�
 # ===========================================================================
 def _set_cn_font(run, name="宋体", size=None, bold=None, color=None):
     run.font.name = name
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), name)
+    # 安全获取 rPr/rFonts，避免首次设置时子元素不存在导致 AttributeError
+    rPr = run._element.get_or_add_rPr()
+    rFonts = rPr.get_or_add_rFonts()
+    rFonts.set(qn("w:eastAsia"), name)
     if size is not None:
         run.font.size = Pt(size)
     if bold is not None:
@@ -428,7 +431,7 @@ def main():
     st = doc.styles["Normal"]
     st.font.name = "宋体"
     st.font.size = Pt(10.5)
-    st.element.rPr.rFonts.set(qn("w:eastAsia"), "宋体")
+    st.element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), "宋体")
 
     cover(doc)
     sec1(doc)

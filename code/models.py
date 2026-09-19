@@ -17,7 +17,8 @@ fit/predict/get_params/set_params 接口，可直接接入 sklearn 的 GridSearc
 
 import os
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-os.environ.setdefault("PYTHONHASHSEED", "0")
+# 注意：PYTHONHASHSEED 必须在 Python 解释器启动前设置才有效，
+# 在脚本内设置无效，因此不在此处设置；如需复现请用 PYTHONHASHSEED=0 python run_all.py
 
 import numpy as np
 from sklearn.base import BaseEstimator, RegressorMixin
@@ -136,17 +137,23 @@ class LSTMModel(BaseEstimator, RegressorMixin):
 # 2. 模型工厂
 # ===========================================================================
 def make_ann(output_dim=1, **kw):
-    """人工神经网络（多层感知机）。"""
+    """人工神经网络（多层感知机）。
+
+    注意：sklearn MLPRegressor 的 early_stopping=True 内部调用
+    train_test_split(shuffle=True) 随机划分验证集，对时间序列构成数据泄漏。
+    因此这里关闭内置 early_stopping，依赖：
+      (1) L2 正则化 alpha（由 GridSearchCV 选优）防止过拟合；
+      (2) 充分的 max_iter 保证收敛；
+      (3) 外层 TimeSeriesSplit 选出最优泛化模型。
+    """
     params = dict(
         hidden_layer_sizes=(128, 64),
         activation="relu",
         solver="adam",
         alpha=1e-4,
         learning_rate_init=1e-3,
-        max_iter=800,
-        early_stopping=True,          # 内部按时间顺序留出末端验证集
-        n_iter_no_change=25,
-        validation_fraction=0.15,
+        max_iter=2000,
+        early_stopping=False,         # 禁用随机划分验证集，防时间序列泄漏
         random_state=C.RANDOM_STATE,
     )
     params.update(kw)
@@ -179,19 +186,20 @@ def make_lstm(output_dim=1, seq_len=C.SEQ_LEN, **kw):
 # ---------------------------------------------------------------------------
 PARAM_GRIDS = {
     "ANN": {
-        "hidden_layer_sizes": [(64,), (128,), (128, 64)],
-        "alpha": [1e-4, 1e-2],
-        "learning_rate_init": [1e-3, 1e-2],
+        "hidden_layer_sizes": [(64,), (128,), (128, 64), (256, 128)],
+        "alpha": [1e-5, 1e-4, 1e-2],
+        "learning_rate_init": [5e-4, 1e-3, 1e-2],
     },
     "RF": {
-        "n_estimators": [200, 400],
-        "max_depth": [None, 12, 20],
-        "min_samples_leaf": [1, 3],
+        "n_estimators": [200, 300, 400, 500],
+        "max_depth": [None, 10, 12, 15, 20, 25],
+        "min_samples_leaf": [1, 3, 5],
     },
     "LSTM": {
-        "units": [(32,), (64,), (32, 32)],
-        "dropout": [0.1, 0.3],
-        "lr": [5e-3],
+        "units": [(32,), (64,), (32, 32), (64, 32)],
+        "dropout": [0.1, 0.2, 0.3],
+        "lr": [5e-3, 1e-3],
+        "epochs": [60, 80],
     },
 }
 
@@ -243,3 +251,101 @@ def grid_search(model_name, X, y, seq_len=None, n_splits=None, verbose=0):
     cv_table["mean_test_RMSE"] = -cv_table["mean_test_score"]
     cv_table = cv_table.drop(columns=["mean_test_score"])
     return gs.best_estimator_, gs.best_params_, cv_table
+
+
+# ===========================================================================
+# 4. 模型持久化与热启动（warm start）
+#    训练好的最优模型保存到磁盘，下次运行时在已有权重基础上继续训练，
+#    而非每次随机初始化从零开始。
+# ===========================================================================
+def _model_path(model_name, strategy, h):
+    """生成模型保存路径。"""
+    fname = f"{model_name}_{strategy}_h{h}.joblib"
+    return os.path.join(C.MODEL_DIR, fname)
+
+
+def save_model(model, model_name, strategy, h):
+    """保存训练好的模型到磁盘。"""
+    import joblib
+    path = _model_path(model_name, strategy, h)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if model_name == "LSTM":
+        # Keras 模型权重单独保存
+        keras_path = path.replace(".joblib", ".keras.weights.h5")
+        model.model_.save_weights(keras_path)
+        joblib.dump({"_keras_weights_path": keras_path}, path)
+    else:
+        joblib.dump(model, path)
+    return path
+
+
+def load_model(model_name, strategy, h):
+    """从磁盘加载已保存的模型；不存在返回 None。"""
+    import joblib
+    path = _model_path(model_name, strategy, h)
+    if not os.path.exists(path):
+        return None
+    try:
+        return joblib.load(path)
+    except Exception:
+        return None
+
+
+def warm_start_train(model_name, X, y, best_params, strategy, h,
+                     seq_len=None, extra_iter=500):
+    """在已有最优模型基础上继续训练（热启动）。
+
+    - ANN：设置 warm_start=True，在已有权重上继续梯度下降
+    - RF：设置 warm_start=True，在已有树基础上增加新树
+    - LSTM：加载已保存的 Keras 权重，继续训练更多 epochs
+
+    返回训练后的模型；没有已保存模型时返回 None。
+    """
+    saved = load_model(model_name, strategy, h)
+    if saved is None:
+        return None
+
+    output_dim = 1 if np.ndim(y) == 1 else np.asarray(y).shape[1]
+    kw = dict(best_params)
+
+    if model_name == "ANN":
+        est = make_ann(output_dim=output_dim, **kw)
+        est.warm_start = True       # sklearn 关键参数：继续训练而非重新初始化
+        est.max_iter = extra_iter
+        est.fit(X, y)
+        print(f"    [热启动] ANN h={h}  从已保存模型继续训练 {extra_iter} 轮")
+        return est
+
+    elif model_name == "RF":
+        est = make_rf(output_dim=output_dim, **kw)
+        est.warm_start = True       # 在已有树基础上增加新树
+        est.n_estimators = extra_iter
+        est.fit(X, y)
+        print(f"    [热启动] RF  h={h}  从已保存模型增加 {extra_iter} 棵树")
+        return est
+
+    elif model_name == "LSTM":
+        keras_path = _model_path(model_name, strategy, h).replace(
+            ".joblib", ".keras.weights.h5")
+        if not os.path.exists(keras_path):
+            return None
+        seq_len_val = seq_len or C.SEQ_LEN
+        est = make_lstm(output_dim=output_dim, seq_len=seq_len_val, **kw)
+        X_sample = np.asarray(X[:1], dtype=np.float32)
+        est.model_ = est._build(X_sample.shape[2])
+        est.model_.load_weights(keras_path)
+        y_arr = np.asarray(y, dtype=np.float32)
+        if y_arr.ndim == 1:
+            y_arr = y_arr.reshape(-1, 1)
+        _, keras = _ensure_tf()
+        es = keras.callbacks.EarlyStopping(
+            monitor="val_loss", patience=est.patience,
+            restore_best_weights=True, min_delta=1e-5)
+        est.model_.fit(
+            np.asarray(X, dtype=np.float32), y_arr,
+            epochs=extra_iter, batch_size=est.batch_size,
+            validation_split=0.1, callbacks=[es], shuffle=False, verbose=0)
+        print(f"    [热启动] LSTM h={h}  从已保存权重继续训练 {extra_iter} epochs")
+        return est
+
+    return None

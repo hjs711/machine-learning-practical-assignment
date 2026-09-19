@@ -180,42 +180,53 @@ SCALERS = {"MinMax": MinMaxScaler, "ZScore": ZScoreScaler}
 
 
 def compare_scalers(df, feature_cols):
-    """对比两种归一化方法：输出各特征归一化前后的统计量。"""
-    X = df[feature_cols].values
+    """对比两种归一化方法：输出各特征归一化前后的统计量。
+
+    防泄漏：scaler 仅在【训练集】上拟合统计量，再应用到全量数据。
+    对比表统计量基于训练集（与实际建模一致），可视化用全量变换后数据。
+    """
+    # 仅训练集用于拟合 scaler
+    tr_mask = df["Date"] <= pd.Timestamp(C.TRAIN_END)
+    X_tr = df.loc[tr_mask, feature_cols].values
+    X_all = df[feature_cols].values
+
     rows = []
     for name, cls in SCALERS.items():
-        Xs = cls().fit_transform(X)
+        scaler = cls().fit(X_tr)          # 仅训练集拟合
+        Xs_tr = scaler.transform(X_tr)    # 训练集上的统计
         rows.append({
             "归一化方法": name,
-            "变换后最小值": round(float(Xs.min()), 4),
-            "变换后最大值": round(float(Xs.max()), 4),
-            "变换后均值": round(float(Xs.mean()), 4),
-            "变换后标准差": round(float(Xs.std()), 4),
+            "变换后最小值": round(float(Xs_tr.min()), 4),
+            "变换后最大值": round(float(Xs_tr.max()), 4),
+            "变换后均值": round(float(Xs_tr.mean()), 4),
+            "变换后标准差": round(float(Xs_tr.std()), 4),
             "是否受量纲影响": "否" if name == "MinMax" else "否",
             "是否受异常值影响": "是（min/max 由极值决定）" if name == "MinMax"
                                 else "较小（由均值方差决定）",
         })
-    # 原始
+    # 原始（训练集）
     rows.insert(0, {
         "归一化方法": "原始数据",
-        "变换后最小值": round(float(X.min()), 4),
-        "变换后最大值": round(float(X.max()), 4),
-        "变换后均值": round(float(X.mean()), 4),
-        "变换后标准差": round(float(X.std()), 4),
+        "变换后最小值": round(float(X_tr.min()), 4),
+        "变换后最大值": round(float(X_tr.max()), 4),
+        "变换后均值": round(float(X_tr.mean()), 4),
+        "变换后标准差": round(float(X_tr.std()), 4),
         "是否受量纲影响": "是", "是否受异常值影响": "是",
     })
     tab = pd.DataFrame(rows)
     tab.to_csv(os.path.join(C.RESULT_DIR, "03_归一化方法对比.csv"),
                index=False, encoding="utf-8-sig")
 
-    # 可视化
+    # 可视化：用训练集拟合 scaler，变换全量数据展示分布
     show = [c for c in ["Discharge", "Prcp", "Srad", "Vp", "Tmax"] if c in feature_cols][:5]
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
     idx = [feature_cols.index(c) for c in show]
+    mm = MinMaxScaler().fit(X_tr)
+    zs = ZScoreScaler().fit(X_tr)
     for ax, (name, data) in zip(axes, [
-            ("(a) 原始数据", X[:, idx]),
-            ("(b) Min-Max 归一化", MinMaxScaler().fit_transform(X)[:, idx]),
-            ("(c) Z-score 标准化", ZScoreScaler().fit_transform(X)[:, idx])]):
+            ("(a) 原始数据", X_all[:, idx]),
+            ("(b) Min-Max 归一化（训练集拟合）", mm.transform(X_all)[:, idx]),
+            ("(c) Z-score 标准化（训练集拟合）", zs.transform(X_all)[:, idx])]):
         bp = ax.boxplot([data[:, i] for i in range(len(show))], labels=show,
                         patch_artist=True,
                         flierprops=dict(marker=".", markersize=2, alpha=.3))
@@ -224,7 +235,7 @@ def compare_scalers(df, feature_cols):
             patch.set_alpha(0.6)
         ax.set_title(name, fontsize=11)
         ax.tick_params(axis="x", rotation=30)
-    plt.suptitle("图2-1  归一化前后特征取值分布对比", fontsize=13, y=1.03)
+    plt.suptitle("图2-1  归一化前后特征取值分布对比（scaler 仅训练集拟合）", fontsize=13, y=1.03)
     plt.tight_layout()
     save(fig, "fig7_归一化对比.png")
     return tab
@@ -245,14 +256,17 @@ def select_features(df, feature_cols, top_k=None, verbose=True):
     tr = df[df["Date"] <= pd.Timestamp(C.TRAIN_END)]
 
     X = tr[feature_cols].values
-    y = tr[C.TARGET].values
+    # 与建模保持一致：若建模用 log(y)，特征选择也基于 log(y)，
+    # 否则皮尔逊相关系数被少数极值洪水扭曲，与实际优化目标不一致。
+    y_raw = tr[C.TARGET].values
+    y = np.log(np.maximum(y_raw, 1e-6)) if C.TARGET_TRANSFORM == "log" else y_raw
 
-    # --- 皮尔逊相关系数法 ---
+    # --- 皮尔逊相关系数法（基于对数变换后的目标） ---
     pear = np.array([abs(np.corrcoef(X[:, i], y)[0, 1])
                      if X[:, i].std() > 0 else 0.0
                      for i in range(X.shape[1])])
 
-    # --- 互信息法 ---
+    # --- 互信息法（基于对数变换后的目标；互信息对单调变换不变，这里保持一致） ---
     mi = mutual_info_regression(X, y, random_state=C.RANDOM_STATE)
     mi = np.nan_to_num(mi)
 

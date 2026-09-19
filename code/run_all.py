@@ -21,6 +21,11 @@ import sys
 import time
 import warnings
 
+# Windows 控制台默认 GBK，重定向到文件时中文乱码；统一为 UTF-8
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 warnings.filterwarnings("ignore")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 

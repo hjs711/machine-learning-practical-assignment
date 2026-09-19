@@ -83,6 +83,11 @@ class DataBundle:
         self.test_start_label = str(pd.Timestamp(C.TEST_START).date())
 
     # -- 不同模型的输入视图 -------------------------------------------------
+    # 注意：三种模型输入形式不同但信息对等：
+    #   ANN/RF：当天特征向量（已含预构造的 lag/rolling 统计），利用人工特征
+    #   LSTM：过去 30 天 × 全部特征的序列，由循环网络自行学习时序依赖
+    # 预构造的 lag/rolling 特征对 LSTM 有冗余（它能从序列中学到），
+    # 但保留它们不影响正确性，且保证三种模型使用同一套特征子集。
     def X_of(self, origins, model_name):
         if model_name == "LSTM":
             return self.Xseq[origins - self.START]
@@ -110,7 +115,12 @@ class DataBundle:
 # 单个模型的训练（含 GridSearchCV）
 # ===========================================================================
 def train_direct(ds, model_name, verbose=0):
-    """多步直接预测：为每个预见期 h 训练一个模型，返回 7 个模型的预测与超参数。"""
+    """多步直接预测：为每个预见期 h 训练一个模型，返回 7 个模型的预测与超参数。
+
+    热启动逻辑：若 output/models/ 下已有该模型的已保存文件，
+    则在已有权重基础上继续训练（warm start），而非每次从零开始。
+    继续训练后再次保存模型，下次运行时在更新后的权重上继续。
+    """
     results = {}
     for h in range(1, C.HORIZON + 1):
         t0 = time.time()
@@ -118,7 +128,40 @@ def train_direct(ds, model_name, verbose=0):
         Xtr = ds.X_of(tr_org, model_name)
         ytr = ds.y_direct(tr_org, h)
 
-        est, best, cvtab = M.grid_search(model_name, Xtr, ytr, verbose=verbose)
+        # --- 热启动：检查是否有已保存的模型 ---
+        saved = M.load_model(model_name, "direct", h)
+        if saved is not None:
+            if model_name == "LSTM":
+                est = M.warm_start_train(
+                    model_name, Xtr, ytr, saved, "direct", h,
+                    seq_len=C.SEQ_LEN, extra_iter=30)
+                if est is None:
+                    est, best, cvtab = M.grid_search(
+                        model_name, Xtr, ytr, verbose=verbose)
+                    M.save_model(est, model_name, "direct", h)
+                else:
+                    best = saved
+                    cvtab = pd.DataFrame([{"params": "warm-start",
+                                           "rank_test_score": 1,
+                                           "mean_test_RMSE": np.nan}])
+            else:
+                saved.warm_start = True
+                if model_name == "ANN":
+                    saved.max_iter = 500
+                elif model_name == "RF":
+                    saved.n_estimators += 200
+                saved.fit(Xtr, ytr)
+                est = saved
+                best = {k: v for k, v in saved.get_params().items()
+                        if k in M.PARAM_GRIDS[model_name]}
+                cvtab = pd.DataFrame([{"params": str(best), "rank_test_score": 1,
+                                       "mean_test_RMSE": np.nan}])
+            M.save_model(est, model_name, "direct", h)
+            print(f"    [热启动] {model_name:<5} h={h}  从已保存模型继续训练")
+        else:
+            est, best, cvtab = M.grid_search(model_name, Xtr, ytr, verbose=verbose)
+            M.save_model(est, model_name, "direct", h)
+
         yp_scaled = np.asarray(est.predict(ds.X_of(ds.eval_origins, model_name)),
                                dtype=float).ravel()
         yp = ds.inv_y(yp_scaled)
@@ -133,13 +176,49 @@ def train_direct(ds, model_name, verbose=0):
 
 
 def train_multioutput(ds, model_name, verbose=0):
-    """多输出预测：训练 1 个模型，同时输出未来 1~7 天径流。"""
+    """多输出预测：训练 1 个模型，同时输出未来 1~7 天径流。
+
+    热启动逻辑：若 output/models/ 下已有该模型的已保存文件，
+    则在已有权重基础上继续训练（warm start），而非每次从零开始。
+    """
     t0 = time.time()
     tr_org = np.arange(ds.START, ds.train_end - C.HORIZON + 1)
     Xtr = ds.X_of(tr_org, model_name)
     ytr = ds.y_multi(tr_org)
 
-    est, best, cvtab = M.grid_search(model_name, Xtr, ytr, verbose=verbose)
+    saved = M.load_model(model_name, "multi", h=1)
+    if saved is not None:
+        if model_name == "LSTM":
+            est = M.warm_start_train(
+                model_name, Xtr, ytr, saved, "multi", 1,
+                seq_len=C.SEQ_LEN, extra_iter=30)
+            if est is None:
+                est, best, cvtab = M.grid_search(
+                    model_name, Xtr, ytr, verbose=verbose)
+                M.save_model(est, model_name, "multi", 1)
+            else:
+                best = saved
+                cvtab = pd.DataFrame([{"params": "warm-start",
+                                       "rank_test_score": 1,
+                                       "mean_test_RMSE": np.nan}])
+        else:
+            saved.warm_start = True
+            if model_name == "ANN":
+                saved.max_iter = 500
+            elif model_name == "RF":
+                saved.n_estimators += 200
+            saved.fit(Xtr, ytr)
+            est = saved
+            best = {k: v for k, v in saved.get_params().items()
+                    if k in M.PARAM_GRIDS[model_name]}
+            cvtab = pd.DataFrame([{"params": str(best), "rank_test_score": 1,
+                                   "mean_test_RMSE": np.nan}])
+        M.save_model(est, model_name, "multi", 1)
+        print(f"    [热启动] {model_name:<5} 多输出  从已保存模型继续训练")
+    else:
+        est, best, cvtab = M.grid_search(model_name, Xtr, ytr, verbose=verbose)
+        M.save_model(est, model_name, "multi", h=1)
+
     pm_scaled = np.asarray(est.predict(ds.X_of(ds.eval_origins, model_name)),
                            dtype=float)
     if pm_scaled.ndim == 1:
@@ -187,7 +266,8 @@ def ensemble_stacking(ds, strategy, base_preds, base_est_params,
     meta_coefs = []
 
     for h in range(1, C.HORIZON + 1):
-        if strategy == "direct":
+        is_direct = (strategy == "direct")
+        if is_direct:
             tr_org = np.arange(ds.START, ds.train_end - h + 1)
             ytr = ds.y_direct(tr_org, h)
         else:
@@ -201,11 +281,20 @@ def ensemble_stacking(ds, strategy, base_preds, base_est_params,
             for j, mname in enumerate(model_names):
                 kw = dict(base_est_params[mname][strategy][h])
                 kw.pop("output_dim", None)
-                est = M.MODEL_FACTORY[mname](output_dim=1, **kw)
-                yy = (ds.y_direct(tr_org[tr_i], h) if strategy == "direct"
-                      else ds.y_multi(tr_org[tr_i])[:, h - 1])
-                est.fit(ds.X_of(tr_org[tr_i], mname), yy)
-                oof[va_i, j] = est.predict(ds.X_of(tr_org[va_i], mname))
+                if is_direct:
+                    # 直接策略：OOF 与测试预测都来自单输出模型，分布一致
+                    est = M.MODEL_FACTORY[mname](output_dim=1, **kw)
+                    yy = ds.y_direct(tr_org[tr_i], h)
+                    est.fit(ds.X_of(tr_org[tr_i], mname), yy)
+                    oof[va_i, j] = est.predict(ds.X_of(tr_org[va_i], mname))
+                else:
+                    # 多输出策略：OOF 必须与测试预测来自同一多输出模型，
+                    # 否则元学习器学到的权重作用于不同分布的特征（train-serving skew）
+                    est = M.MODEL_FACTORY[mname](output_dim=C.HORIZON, **kw)
+                    yy = ds.y_multi(tr_org[tr_i])
+                    est.fit(ds.X_of(tr_org[tr_i], mname), yy)
+                    p = np.asarray(est.predict(ds.X_of(tr_org[va_i], mname)))
+                    oof[va_i, j] = p.ravel() if p.ndim == 1 else p[:, h - 1]
 
         ok = ~np.isnan(oof).any(axis=1)
         meta = Ridge(alpha=1.0, random_state=C.RANDOM_STATE)
