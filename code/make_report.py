@@ -167,10 +167,10 @@ def cover(doc):
         para(doc, "", indent=False)
 
     rows = [("题    目", "基于机器学习的径流预测（USGS 01047000 流域）"),
-            ("专    业", "【请填写专业】"),
-            ("学    号", "【请填写学号】"),
-            ("姓    名", "【请填写姓名】"),
-            ("指导教师", "【请填写指导教师】"),
+            ("专    业", C.REPORT_META["专业"]),
+            ("学    号", C.REPORT_META["学号"]),
+            ("姓    名", C.REPORT_META["姓名"]),
+            ("指导教师", C.REPORT_META["指导教师"]),
             ("成    绩", "")]
     t = doc.add_table(rows=len(rows), cols=2)
     t.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -272,15 +272,15 @@ def sec2(doc):
     para(doc, "本实践由 3 人组队完成。为保证 40 个模型的构建、调试与结果整理能够高效推进，"
               "按「数据与特征 → 个体模型 → 集成与评价」三段式分工，各成员职责如下：")
     df = pd.DataFrame([
-        ["【姓名1】", "组长", "数据与特征工程",
+        [C.REPORT_META["组员1"], "组长", "数据与特征工程",
          "数据读取与字段释义；时间序列/直方图/箱型图/相关系数热力图可视化分析；"
          "季节与月份编码、滞后特征、窗口特征提取；Min-Max 与 Z-score 归一化实现；"
          "皮尔逊相关系数法与互信息法特征选择；负责报告第一、二章撰写与全文统稿"],
-        ["【姓名2】", "组员", "个体预测模型",
+        [C.REPORT_META["组员2"], "组员", "个体预测模型",
          "ANN（多层感知机）多步直接与多输出模型构建；随机森林多步直接与多输出模型构建；"
          "LSTM 网络结构设计与 Keras 模型封装；Grid Search CV 超参数寻优；"
          "多步直接/多输出两种预测策略的数据集构造；负责报告第三章「过程设计」撰写"],
-        ["【姓名3】", "组员", "集成学习与评价",
+        [C.REPORT_META["组员3"], "组员", "集成学习与评价",
          "简单平均集成建模；Stacking 集成（含折外预测 OOF 生成与 Ridge 元学习器）；"
          "RMSE/MAE/NSE/R²/PBIAS/MAPE 指标实现；预测结果可视化与误差分析；"
          "负责报告第四章结果整理、第五章调试记录与第六章总结撰写"],
@@ -400,11 +400,11 @@ def sec3(doc):
 
     h(doc, "3.7 工具与算法汇总", 2)
     df = pd.DataFrame([
-        ["开发环境", "Windows 11 + Python 3.13", "操作系统与解释器"],
+        ["开发环境", "Windows 11 + Python 3.12", "操作系统与解释器"],
         ["数据处理", "pandas、numpy", "数据读取、特征构造与变换"],
         ["机器学习", "scikit-learn", "MLPRegressor、RandomForestRegressor、Ridge、"
                                     "GridSearchCV、TimeSeriesSplit"],
-        ["深度学习", "TensorFlow 2.20 / Keras", "LSTM 网络构建与训练"],
+        ["深度学习", "TensorFlow 2.x / Keras", "LSTM 网络构建与训练"],
         ["可视化", "matplotlib", "全部统计图表绘制"],
         ["评价指标", "自实现 + scikit-learn", "NSE、PBIAS 等水文专用指标"],
     ], columns=["环节", "工具/库", "用途"])
@@ -417,7 +417,7 @@ def sec3(doc):
 # ===========================================================================
 def main():
     from report_sections import (make_flowchart, sec4, sec4_conclusions,
-                                 sec5, sec6, appendix)
+                                 sec5, sec6, sec7, appendix)
 
     print("生成实验报告 ...")
     make_flowchart()
@@ -441,6 +441,7 @@ def main():
     sec4_conclusions(doc)
     sec5(doc)
     sec6(doc)
+    sec7(doc)
     appendix(doc)
 
     doc.save(REPORT_PATH)

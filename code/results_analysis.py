@@ -194,7 +194,7 @@ def _error_analysis(observed, origins, preds):
 
     # (a) 误差箱线图
     errs = [preds[k][1] - obs1 for k in names]
-    bp = axes[0].boxplot(errs, labels=names, patch_artist=True, showfliers=False)
+    bp = axes[0].boxplot(errs, tick_labels=names, patch_artist=True, showfliers=False)
     for patch, c in zip(bp["boxes"], PALETTE):
         patch.set_facecolor(c)
         patch.set_alpha(0.6)

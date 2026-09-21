@@ -227,7 +227,7 @@ def compare_scalers(df, feature_cols):
             ("(a) 原始数据", X_all[:, idx]),
             ("(b) Min-Max 归一化（训练集拟合）", mm.transform(X_all)[:, idx]),
             ("(c) Z-score 标准化（训练集拟合）", zs.transform(X_all)[:, idx])]):
-        bp = ax.boxplot([data[:, i] for i in range(len(show))], labels=show,
+        bp = ax.boxplot([data[:, i] for i in range(len(show))], tick_labels=show,
                         patch_artist=True,
                         flierprops=dict(marker=".", markersize=2, alpha=.3))
         for patch in bp["boxes"]:

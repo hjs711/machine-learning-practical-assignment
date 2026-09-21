@@ -27,8 +27,21 @@
 
 ## 运行环境
 
-- Windows 11 / Python 3.13
-- 依赖：`pip install pandas numpy scikit-learn matplotlib tensorflow-cpu python-docx`
+推荐使用独立虚拟环境（避免与系统 Python 包冲突；本机已创建于 D 盘）：
+
+```bash
+# 首次创建（可选，已在 D:\ml_venv 创建好）
+python -m venv D:\ml_venv
+
+# 激活并使用
+D:\ml_venv\Scripts\python.exe -m pip install numpy scipy scikit-learn pandas \
+    matplotlib tensorflow-cpu python-docx openpyxl joblib
+```
+
+- Windows 11 / Python 3.12+
+- 已测试版本：numpy 2.5、scipy 1.18、scikit-learn 1.9、pandas 3.0、
+  matplotlib 3.11、tensorflow-cpu 2.21 / keras 3.15
+- 运行命令把下面的 `python` 替换为 `D:\ml_venv\Scripts\python.exe`
 
 ## 一键运行
 
@@ -38,6 +51,18 @@ python run_all.py              # 完整运行（含全部 GridSearchCV，约 1.5
 python run_all.py --fast       # 小规模快速验证（缩小网格与训练轮数，约 10 分钟）
 python run_all.py --skip-model # 跳过建模，仅基于已有结果重绘图表与报告
 ```
+
+## 模型热启动（在已有最优模型上继续训练）
+
+`output/models/` 保存了上一次训练的最优模型。再次运行 `run_all.py` 时，
+程序会自动检测并加载已保存模型，在其基础上**继续训练**（而非从零开始）：
+
+- ANN：`warm_start=True`，继续迭代 500 轮；
+- RF：`n_estimators += 200`（在原树数上增加）；
+- LSTM：加载已保存权重，继续训练 30 个 epochs；
+- 训练完成后再次保存更新后的模型，供下一次热启动使用。
+
+如需完全从零训练，删除 `output/models/` 目录下的文件即可。
 
 ## 实验设计要点
 

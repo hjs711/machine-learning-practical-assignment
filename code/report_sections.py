@@ -1,13 +1,84 @@
 # -*- coding: utf-8 -*-
 """实验报告第四~六章及附录的正文生成（被 make_report.py 调用）。"""
 
+import ast
 import os
+
+import numpy as np
 import pandas as pd
 
 import config as C
+import models as M
 from make_report import (h, para, bullet, figure, table, code_block, caption,
                          page_break, read_csv, src, _set_cn_font, FIG)
 from docx.shared import Pt
+
+
+# ===========================================================================
+# 从 results CSV 动态读取指标
+# 报告中出现的所有模型精度数字都必须来自实验结果文件，
+# 杜绝与运行结果不一致的硬编码（此前曾因 LSTM 未运行而出现不实数字）。
+# ===========================================================================
+def _detail():
+    return read_csv("10_各模型各预见期指标.csv")
+
+
+def _pooled():
+    return read_csv("11_模型汇总指标.csv")
+
+
+def _metric(df, model_cn, strat, h, col="NSE"):
+    """从指标表读取 某模型×某策略×预见期(h 或 '1-7(汇总)') 的指标值。"""
+    if df is None or df.empty:
+        return None
+    r = df[(df["模型"] == model_cn) & (df["策略"] == strat) & (df["预见期"] == h)]
+    if r.empty or col not in r.columns:
+        return None
+    v = r.iloc[0][col]
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def metric_h(model_cn, strat, h, col="NSE"):
+    """逐预见期指标。"""
+    return _metric(_detail(), model_cn, strat, int(h), col)
+
+
+def metric_pooled(model_cn, strat, col="NSE"):
+    """1~7 天汇总指标。"""
+    return _metric(_pooled(), model_cn, strat, "1-7(汇总)", col)
+
+
+def fmt(v, nd=3):
+    """格式化指标；缺失时返回 '——'。"""
+    return "——" if v is None else f"{v:.{nd}f}"
+
+
+def stacking_coefs(strat_cn="多步直接预测"):
+    """读取 Stacking 元学习器系数，返回 [(模型中文名, 平均系数), ...]。
+
+    系数顺序与 experiment.py 中 base_preds 的模型顺序一致
+    （BASE_MODELS = ANN → RF → LSTM 中实际可用的子集）。
+    """
+    df = read_csv("14_Stacking元学习器系数.csv")
+    if df is None or df.empty:
+        return []
+    sub = df[df["策略"] == strat_cn]
+    if sub.empty:
+        return []
+    coefs = []
+    for _, row in sub.iterrows():
+        try:
+            coefs.append(np.asarray(ast.literal_eval(str(row["Ridge系数"])), dtype=float))
+        except (ValueError, SyntaxError):
+            return []
+    arr = np.vstack(coefs)              # (7, n_models)
+    n = arr.shape[1]
+    # 顺序与 experiment.py 的 BASE_MODELS = ["ANN", "RF", "LSTM"] 一致
+    names = [M.MODEL_CN[m] for m in ["ANN", "RF", "LSTM"][:n]]
+    return list(zip(names, arr.mean(axis=0)))
 
 
 # ===========================================================================
@@ -83,11 +154,11 @@ def sec4(doc):
     h(doc, "四、编码实现及结果", 1)
 
     h(doc, "4.1 开发环境", 2)
-    para(doc, "操作系统 Windows 11；编程语言 Python 3.13；主要算法库："
-              "scikit-learn 1.6.1（机器学习与超参数搜索）、"
-              "TensorFlow 2.20 / Keras（LSTM 深度学习）、"
-              "pandas 2.2.3 与 numpy 2.1.3（数据处理）、"
-              "matplotlib 3.10（可视化）。全部代码组织为 8 个模块，"
+    para(doc, "操作系统 Windows 11；编程语言 Python 3.12；主要算法库："
+              "scikit-learn（机器学习与超参数搜索）、"
+              "TensorFlow 2.x / Keras（LSTM 深度学习）、"
+              "pandas 与 numpy（数据处理）、"
+              "matplotlib（可视化）。全部代码组织为 8 个模块，"
               "可通过 run_all.py 一键复现全部结果。")
 
     # ---------------- 4.2 数据分析 ----------------
@@ -197,12 +268,14 @@ def sec4(doc):
               "说明径流自身的近期状态是最强的预测因子；"
               "降水类特征（Prcp 及其累积量）次之；"
               "单纯的同期气象因子贡献相对有限。"
-              "按互信息得分从高到低保留前 40 个特征作为最终输入。")
+              f"按互信息得分从高到低保留前 {C.TOP_K_FEATURES} 个特征作为最终输入。")
     figure(doc, os.path.join(FIG, "fig9_特征类别贡献.png"),
            "图 4-9  各类特征对径流的互信息贡献")
     para(doc, "为验证特征选择的效果，比较了保留不同特征个数时随机森林的精度"
-              "（表 4-5）。保留 40 个特征时精度已接近使用全部 81 个特征的水平，"
-              "而特征维数降低一半，有利于抑制过拟合，因此最终取 TOP_K = 40。")
+              "（表 4-5）。"
+              f"保留 {C.TOP_K_FEATURES} 个特征时精度已接近使用全部 81 个特征的水平，"
+              "而特征维数大幅降低，有利于抑制过拟合，"
+              f"因此最终取 TOP_K = {C.TOP_K_FEATURES}。")
     table(doc, pd.DataFrame([
         ["10", "0.481", "0.130", "-0.034"],
         ["20", "0.479", "0.175", "-0.020"],
@@ -272,9 +345,23 @@ def sec4(doc):
 def sec4_conclusions(doc):
     h(doc, "4.5 结果分析", 2)
 
+    # 全部指标从结果 CSV 动态读取，保证与运行结果一致
+    rf_h1 = metric_h(M.MODEL_CN["RF"], "多步直接预测", 1)
+    rf_h7 = metric_h(M.MODEL_CN["RF"], "多步直接预测", 7)
+    rf_d1 = metric_h(M.MODEL_CN["RF"], "多步直接预测", 1)
+    rf_m1 = metric_h(M.MODEL_CN["RF"], "多输出预测", 1)
+    lstm_h1 = metric_h(M.MODEL_CN["LSTM"], "多步直接预测", 1)
+    ann_h1 = metric_h(M.MODEL_CN["ANN"], "多步直接预测", 1)
+    st_m = metric_pooled("Stacking 集成", "多输出预测")
+    rf_m = metric_pooled(M.MODEL_CN["RF"], "多输出预测")
+    ann_d = metric_pooled(M.MODEL_CN["ANN"], "多步直接预测")
+    rf_d = metric_pooled(M.MODEL_CN["RF"], "多步直接预测")
+    lstm_d = metric_pooled(M.MODEL_CN["LSTM"], "多步直接预测")
+    coefs = stacking_coefs("多步直接预测")
+
     para(doc, "（1）精度随预见期单调衰减。所有模型都表现出同样的规律："
               "预见期越长，精度越低。以随机森林多步直接预测为例，"
-              "NSE 由 h=1 的 0.476 单调下降到 h=7 的 0.045。"
+              f"NSE 由 h=1 的 {fmt(rf_h1)} 单调下降到 h=7 的 {fmt(rf_h7)}。"
               "这与物理机理一致——模型的输入中不含未来的降水信息，"
               "而该流域降水—径流响应时间不足 1 天，"
               "随着预见期延长，未来降水的未知性成为误差的主要来源，"
@@ -282,32 +369,61 @@ def sec4_conclusions(doc):
 
     para(doc, "（2）多步直接预测与多输出预测的对比。在同一模型下，"
               "多步直接预测在短预见期（h = 1~3）上普遍优于多输出预测，"
-              "如随机森林 h=1 的 NSE 分别为 0.476 与 0.412；"
+              f"如随机森林 h=1 的 NSE 分别为 {fmt(rf_d1)} 与 {fmt(rf_m1)}；"
               "但在长预见期上两者趋于接近甚至多输出略优。"
               "原因是多步直接策略为每个预见期单独优化、模型容量专一，"
               "短预见期拟合更充分；而多输出策略的 7 个输出共享同一套隐层表示，"
               "虽能利用预见期之间的相关性、参数更少不易过拟合，"
               "但存在「任务竞争」，短预见期的精度会被牺牲。")
 
-    para(doc, "（3）模型间对比。随机森林整体表现最好且最稳定，"
-              "各预见期的 NSE 均为正值（h=1 达 0.476）；"
-              "LSTM 次之，短预见期尚可（h=1 为 0.227）但随预见期延长迅速转负、波动较大；"
-              "ANN 表现最弱且不稳定，多输出策略下个别预见期的 NSE 甚至低于 −1。"
-              "随机森林的优势在于：它天然处理非线性与特征交互，"
-              "对特征量纲和异常值不敏感，"
-              "且在训练样本仅 1400 余天的情形下，"
-              "比参数更多的神经网络更不容易过拟合。"
-              "LSTM 表现不及预期，与训练样本量偏少、"
-              "以及该流域径流强烈的非平稳性（洪枯悬殊、无典型周期）有关。")
+    # 依据实际汇总 NSE 动态生成模型排序结论
+    rank = sorted(
+        [(c, v) for c, v in
+         [(M.MODEL_CN["ANN"], ann_d), (M.MODEL_CN["RF"], rf_d),
+          (M.MODEL_CN["LSTM"], lstm_d)] if v is not None],
+        key=lambda t: -t[1])
+    if len(rank) == 3:
+        best_cn, best_v = rank[0]
+        mid_cn, mid_v = rank[1]
+        worst_cn, worst_v = rank[2]
+        para(doc, f"（3）模型间对比。从多步直接策略的汇总 NSE 看，{best_cn} 表现最好"
+                  f"（{fmt(best_v)}），{mid_cn} 次之（{fmt(mid_v)}），"
+                  f"{worst_cn} 相对最弱（{fmt(worst_v)}）。"
+                  f"以最常用的 h=1 预见期为例：{M.MODEL_CN['RF']} 为 {fmt(rf_h1)}、"
+                  f"{M.MODEL_CN['ANN']} 为 {fmt(ann_h1)}、"
+                  f"{M.MODEL_CN['LSTM']} 为 {fmt(lstm_h1)}。"
+                  "随机森林的优势在于：它天然处理非线性与特征交互，"
+                  "对特征量纲和异常值不敏感，"
+                  "且在训练样本仅 1400 余天的情形下，"
+                  "比参数更多的神经网络更不容易过拟合。"
+                  "神经网络类模型表现相对波动，与训练样本量偏少、"
+                  "以及该流域径流强烈的非平稳性（洪枯悬殊、无典型周期）有关。")
+    else:
+        para(doc, f"（3）模型间对比。{M.MODEL_CN['RF']} 在多步直接策略上的汇总 NSE "
+                  f"为 {fmt(rf_d)}，是当前个体模型中表现最好且最稳定的；"
+                  f"{M.MODEL_CN['ANN']} 为 {fmt(ann_d)}。"
+                  "随机森林的优势在于：它天然处理非线性与特征交互，"
+                  "对特征量纲和异常值不敏感，"
+                  "且在训练样本仅 1400 余天的情形下，"
+                  "比参数更多的神经网络更不容易过拟合。")
 
-    para(doc, "（4）集成效果。简单平均与 Stacking 两种集成方式整体上都优于"
-              "表现最差的个体模型 ANN；Stacking 在多输出策略下的汇总 NSE（0.197）"
-              "甚至略高于随机森林（0.182），但都没有大幅超越最强的个体模型随机森林。"
-              "从 Stacking 元学习器的系数看（三种基模型在直接策略下的平均系数为 "
-              "ANN 0.22、RF 0.93、LSTM −0.14），随机森林的权重始终最大、"
-              "LSTM 的权重为负，说明元学习器主要通过放大随机森林的贡献、"
-              "压低 LSTM 来提升精度。三个个体模型之间的误差相关性较高、"
-              "多样性不足，限制了集成效果的上限。")
+    if coefs:
+        coef_txt = "、".join(f"{cn} {v:.2f}" for cn, v in coefs)
+        para(doc, f"（4）集成效果。简单平均与 Stacking 两种集成方式整体上都优于"
+                  f"表现最差的个体模型；Stacking 在多输出策略下的汇总 NSE "
+                  f"（{fmt(st_m)}）与随机森林（{fmt(rf_m)}）相当，"
+                  "但没有大幅超越最强的个体模型。"
+                  f"从 Stacking 元学习器的系数看（基模型在直接策略下的平均系数为 "
+                  f"{coef_txt}），元学习器主要通过对不同基模型加权来提升精度。"
+                  "各基模型之间的误差相关性较高、多样性不足，"
+                  "限制了集成效果的上限。")
+    else:
+        para(doc, f"（4）集成效果。简单平均与 Stacking 两种集成方式整体上都优于"
+                  f"表现最差的个体模型；Stacking 在多输出策略下的汇总 NSE "
+                  f"（{fmt(st_m)}）与随机森林（{fmt(rf_m)}）相当，"
+                  "但没有大幅超越最强的个体模型。"
+                  "各基模型之间的误差相关性较高、多样性不足，"
+                  "限制了集成效果的上限。")
 
     para(doc, "（5）误差结构与洪水量级。误差分析（图 4-19b）显示，"
               "预测误差随流量量级增大而显著增大，"
@@ -546,3 +662,40 @@ def appendix(doc):
         h(doc, title, 3)
         code_block(doc, src(fn))
         para(doc, "", indent=False, space_after=4)
+
+
+# ===========================================================================
+# 参考文献
+# ===========================================================================
+REFERENCES = [
+    "Thornton P E, Shrestha R, Thornton M, et al. Daymet: Daily Surface "
+    "Weather Data on a 1-km Grid for North America, Version 4 R1[R/OL]. "
+    "Oak Ridge National Laboratory DAAC, 2022. "
+    "https://daac.ornl.gov/DAYMET/guides/Daymet_Daily_V4R1.html",
+    "U.S. Geological Survey. USGS 01047000 Kennebec River at Bingham, ME, "
+    "Daily Discharge Data[DB/OL]. National Water Information System (NWIS). "
+    "https://waterdata.usgs.gov/nwis",
+    "Nash J E, Sutcliffe J V. River flow forecasting through conceptual "
+    "models part I — A discussion of principles[J]. Journal of Hydrology, "
+    "1970, 10(3): 282-290.",
+    "Breiman L. Random Forests[J]. Machine Learning, 2001, 45(1): 5-32.",
+    "Hochreiter S, Schmidhuber J. Long Short-Term Memory[J]. Neural "
+    "Computation, 1997, 9(8): 1735-1780.",
+    "Pedregosa F, Varoquaux G, Gramfort A, et al. Scikit-learn: Machine "
+    "Learning in Python[J]. Journal of Machine Learning Research, 2011, "
+    "12: 2825-2830.",
+    "杭州电子科技大学. 《机器学习课程实践》实验指导书——基于机器学习的径流预测[Z]. "
+    "2026.",
+    "Moriasi D N, Arnold J G, Van Liew M W, et al. Model evaluation "
+    "guidelines for systematic quantification of accuracy in watershed "
+    "simulations[J]. Transactions of the ASABE, 2007, 50(3): 885-900.",
+]
+
+
+def sec7(doc):
+    """参考文献（按评分标准要求 ≥ 3 篇，此处列 8 篇）。"""
+    h(doc, "参考文献", 1)
+    for i, r in enumerate(REFERENCES, 1):
+        para(doc, f"[{i}] {r}", indent=False, size=10, space_after=3)
+    page_break(doc)
+

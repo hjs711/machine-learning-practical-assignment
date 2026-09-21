@@ -162,7 +162,7 @@ def fig_boxplot(df):
 
     # 左：标准化后的各变量箱线图，便于横向比较离散程度
     z = (df[cols] - df[cols].mean()) / df[cols].std()
-    bp = axes[0].boxplot([z[c].dropna() for c in cols], labels=cols,
+    bp = axes[0].boxplot([z[c].dropna() for c in cols], tick_labels=cols,
                          patch_artist=True, showfliers=True,
                          flierprops=dict(marker=".", markersize=3,
                                          markerfacecolor=PALETTE[1],
@@ -179,7 +179,7 @@ def fig_boxplot(df):
     d = df.copy()
     d["月"] = d["Date"].dt.month
     data = [d.loc[d["月"] == m, C.TARGET].values for m in range(1, 13)]
-    bp2 = axes[1].boxplot(data, labels=range(1, 13), patch_artist=True,
+    bp2 = axes[1].boxplot(data, tick_labels=range(1, 13), patch_artist=True,
                           flierprops=dict(marker=".", markersize=3,
                                           markerfacecolor=PALETTE[1],
                                           markeredgecolor=PALETTE[1], alpha=.6))

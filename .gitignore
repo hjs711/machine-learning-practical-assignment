@@ -1,0 +1,24 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 模型文件（体积大，不宜纳入版本控制，可通过训练重新生成）
+output/models/*.joblib
+output/models/*.npz
+output/models/*.h5
+!output/models/.gitkeep
+
+# Word 临时锁文件
+~$*.docx
+~$*.doc
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 运行日志与临时输出
+output/*.log
+output/*_text*.txt
+output/guide_text.txt
+output/report_text.txt
