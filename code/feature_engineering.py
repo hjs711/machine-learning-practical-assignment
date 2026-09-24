@@ -256,17 +256,16 @@ def select_features(df, feature_cols, top_k=None, verbose=True):
     tr = df[df["Date"] <= pd.Timestamp(C.TRAIN_END)]
 
     X = tr[feature_cols].values
-    # 与建模保持一致：若建模用 log(y)，特征选择也基于 log(y)，
-    # 否则皮尔逊相关系数被少数极值洪水扭曲，与实际优化目标不一致。
+    # 皮尔逊相关系数：按课程补充讲义的要求，基于【原始径流序列】计算
+    # （以原始序列 {Q_t} 与滞后序列/其他因子序列的相关系数为准）。
     y_raw = tr[C.TARGET].values
-    y = np.log(np.maximum(y_raw, 1e-6)) if C.TARGET_TRANSFORM == "log" else y_raw
-
-    # --- 皮尔逊相关系数法（基于对数变换后的目标） ---
-    pear = np.array([abs(np.corrcoef(X[:, i], y)[0, 1])
+    pear = np.array([abs(np.corrcoef(X[:, i], y_raw)[0, 1])
                      if X[:, i].std() > 0 else 0.0
                      for i in range(X.shape[1])])
 
-    # --- 互信息法（基于对数变换后的目标；互信息对单调变换不变，这里保持一致） ---
+    # 互信息法：对单调变换不变（两种口径理论等价），
+    # 这里沿用建模目标口径 log(y)，与模型训练保持一致。
+    y = np.log(np.maximum(y_raw, 1e-6)) if C.TARGET_TRANSFORM == "log" else y_raw
     mi = mutual_info_regression(X, y, random_state=C.RANDOM_STATE)
     mi = np.nan_to_num(mi)
 
