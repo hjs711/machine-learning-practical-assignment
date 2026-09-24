@@ -56,34 +56,40 @@ def basic_info(df):
 # 图 1：时间序列
 # ---------------------------------------------------------------------------
 def fig_timeseries(df):
-    """径流与主要气象因子的逐日过程线（训练/测试分段标注）。"""
-    fig, axes = plt.subplots(4, 1, figsize=(13, 11), sharex=True)
+    """径流与全部气象因子的逐日过程线（训练/测试分段标注）。
 
-    ax = axes[0]
-    ax.plot(df["Date"], df[C.TARGET], color=PALETTE[0], lw=0.8)
-    ax.set_ylabel("径流 (ft$^3$/s)")
-    ax.set_title("图1-1  01047000 流域逐日径流与气象因子时间序列（2000—2004）", fontsize=13)
-    ax.axvspan(pd.Timestamp(C.TRAIN_START), pd.Timestamp(C.TRAIN_END),
-               color="#2E5C8A", alpha=0.06)
-    ax.axvspan(pd.Timestamp(C.TEST_START), pd.Timestamp(C.TEST_END),
-               color="#C0392B", alpha=0.08)
-    ymax = ax.get_ylim()[1]
-    ax.text(pd.Timestamp("2001-07-01"), ymax * 0.82, "训练期（前4年）",
-            ha="center", color="#2E5C8A", fontsize=10)
-    ax.text(pd.Timestamp("2004-07-01"), ymax * 0.82, "测试期（第5年）",
-            ha="center", color="#C0392B", fontsize=10)
+    按阶段验收要求，对数据集中所有列（日期除外）逐一做时间序列可视化：
+    Discharge + Dayl/Prcp/Srad/Tmax/Tmin/Vp（Swe 为常量列恒为 0，已在特征工程中剔除）。
+    """
+    cols = [C.TARGET] + C.USABLE_RAW_FEATURES   # 7 列：Discharge + 6 个可用气象因子
+    fig, axes = plt.subplots(len(cols), 1, figsize=(13, 3.2 * len(cols)), sharex=True)
 
-    for ax, col in zip(axes[1:], ["Prcp", "Tmax", "Srad"]):
-        cn = C.COLUMN_INFO[col][0]
-        unit = C.COLUMN_INFO[col][1]
-        if col == "Prcp":
-            ax.bar(df["Date"], df[col], width=1.0, color=PALETTE[5], alpha=0.75)
+    for ax, col in zip(axes, cols):
+        if col == C.TARGET:
+            ax.plot(df["Date"], df[col], color=PALETTE[0], lw=0.8)
+            ax.set_ylabel("径流\n(ft$^3$/s)", fontsize=9)
+            ax.axvspan(pd.Timestamp(C.TRAIN_START), pd.Timestamp(C.TRAIN_END),
+                       color="#2E5C8A", alpha=0.06)
+            ax.axvspan(pd.Timestamp(C.TEST_START), pd.Timestamp(C.TEST_END),
+                       color="#C0392B", alpha=0.08)
+            ymax = ax.get_ylim()[1]
+            ax.text(pd.Timestamp("2001-07-01"), ymax * 0.82, "训练期（前4年）",
+                    ha="center", color="#2E5C8A", fontsize=10)
+            ax.text(pd.Timestamp("2004-07-01"), ymax * 0.82, "测试期（第5年）",
+                    ha="center", color="#C0392B", fontsize=10)
         else:
-            ax.plot(df["Date"], df[col], color=PALETTE[1], lw=0.7)
-        ax.set_ylabel(f"{cn}\n({unit})", fontsize=9)
+            cn = C.COLUMN_INFO[col][0]
+            unit = C.COLUMN_INFO[col][1]
+            if col == "Prcp":
+                ax.bar(df["Date"], df[col], width=1.0, color=PALETTE[5], alpha=0.75)
+            else:
+                ax.plot(df["Date"], df[col], color=PALETTE[1], lw=0.7)
+            ax.set_ylabel(f"{cn}\n({unit})", fontsize=9)
 
     axes[-1].xaxis.set_major_locator(mdates.YearLocator())
     axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    plt.suptitle("图1-1  01047000 流域逐日径流与气象因子时间序列（2000—2004，Swe 为常量列已剔除）",
+                 fontsize=13)
     plt.tight_layout()
     return save(fig, "fig1_时间序列.png")
 
@@ -257,8 +263,8 @@ def fig_lag_correlation(df, max_lag=45):
     axes[0].set_ylabel("自相关系数")
     axes[0].legend(fontsize=9)
 
-    # (b) 气象因子与径流的滞后互相关
-    for i, col in enumerate(["Prcp", "Tmax", "Vp", "Srad"]):
+    # (b) 气象因子与径流的滞后互相关（全部 6 个可用因子，满足验收要求）
+    for i, col in enumerate(C.USABLE_RAW_FEATURES):
         cc = [df[col].corr(y.shift(-k)) for k in range(0, max_lag + 1)]
         axes[1].plot(range(max_lag + 1), cc, "-o", ms=3, lw=1.5,
                      color=PALETTE[i], label=C.COLUMN_INFO[col][0])
